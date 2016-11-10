@@ -181,7 +181,7 @@ typedef struct _SFForwardingTarget6 {
   int sock;
 } SFForwardingTarget6;
 
-typedef enum { SFLFMT_FULL=0, SFLFMT_PCAP, SFLFMT_LINE, SFLFMT_NETFLOW, SFLFMT_FWD, SFLFMT_CLF, SFLFMT_SCRIPT } EnumSFLFormat;
+typedef enum { SFLFMT_FULL=0, SFLFMT_PCAP, SFLFMT_LINE, SFLFMT_NETFLOW, SFLFMT_FWD, SFLFMT_CLF, SFLFMT_SCRIPT, SFLFMT_JSON } EnumSFLFormat;
 
 #define SA_MAX_PCAP_PKT 65536
 #define SA_MAX_SFLOW_PKT_SIZ 65536
@@ -626,9 +626,75 @@ static char *printAddress(SFLAddress *address, char *buf) {
 }
 
 /*_________________---------------------------__________________
-  _________________    sampleFilterOK         __________________
+  _________________    writeFlowElastic       __________________
   -----------------___________________________------------------
 */
+static void writeFlowElastic(SFSample *sample)
+{
+  char agentIP[51], srcIP[51], dstIP[51];
+  struct timespec spec;
+  struct tm* tm_info;
+  char *buf;
+
+  if (clock_gettime(CLOCK_REALTIME, &spec) == -1) {
+    exit(-41);
+  }
+
+  tm_info = gmtime(&spec.tv_sec);
+
+  if (tm_info == 0) {
+    exit(-42);
+  }
+
+  printf("{ \"index\": { \"_index\":\"sflow-%04d-%02d-%02d\", \"_type\":\"Sample\"} }\n",
+    tm_info->tm_year + 1900,
+    tm_info->tm_mon + 1,
+    tm_info->tm_mday
+  );
+
+  printf("{\"date\":%d%03d,\"agent_ip\":\"%s\",\"input_port\":%d,\"output_port\":%d,",
+    spec.tv_sec, (int)(spec.tv_nsec / 1.0e6),
+    printAddress(&sample->agent_addr, agentIP), sample->inputPort, sample->outputPort
+  );
+
+  printf("\"eth_src\":\"%02x%02x%02x%02x%02x%02x\",\"eth_dst\":\"%02x%02x%02x%02x%02x%02x\",",
+      sample->eth_src[0],
+      sample->eth_src[1],
+      sample->eth_src[2],
+      sample->eth_src[3],
+      sample->eth_src[4],
+      sample->eth_src[5],
+      sample->eth_dst[0],
+      sample->eth_dst[1],
+      sample->eth_dst[2],
+      sample->eth_dst[3],
+      sample->eth_dst[4],
+      sample->eth_dst[5]
+  );
+
+  printf("\"eth_type\":%d,\"vlan_in\":%d,\"vlan_out\":%d,\"sample_srcip\":\"%s\",\"sample_dstip\":\"%s\",",
+    sample->eth_type,
+    sample->in_vlan,
+    sample->out_vlan,
+    printAddress(&sample->ipsrc, srcIP),
+    printAddress(&sample->ipdst, dstIP)
+  );
+
+  printf("\"sample_ipprotocol\":%d,\"sample_iptos\":%d,\"sample_ipttl\":%d,\"sample_ipsport\":%d,\"sample_ipdstport\":%d,\"sample_tcpflags\":%d,",
+    sample->dcd_ipProtocol,
+    sample->dcd_ipTos,
+    sample->dcd_ipTTL,
+    sample->dcd_sport,
+    sample->dcd_dport,
+    sample->dcd_tcpFlags
+  );
+
+  printf("\"sample_packetsize\":%d,\"sample_spacketsize\":%d,\"mean_skip_counter\":%d}\n",
+    sample->sampledPacketSize,
+    sample->sampledPacketSize - sample->stripped - sample->offsetToIPV4,
+    sample->meanSkipCount
+  );
+}
 
 int sampleFilterOK(SFSample *sample)
 {
@@ -2790,6 +2856,9 @@ static void readFlowSample_v2v4(SFSample *sample)
       /* or line-by-line output... */
       writeFlowLine(sample);
       break;
+    case SFLFMT_JSON:
+      writeFlowElastic(sample);
+      break;
     case SFLFMT_CLF:
     case SFLFMT_FULL:
     case SFLFMT_SCRIPT:
@@ -4789,6 +4858,7 @@ static void instructions(char *command)
   fprintf(ERROUT, "   -l                 -  (output in line-by-line CSV format)\n");
   fprintf(ERROUT, "   -g                 -  (output in 'grep-friendly' format)\n");
   fprintf(ERROUT, "   -H                 -  (output HTTP common log file format)\n");
+  fprintf(ERROUT, "   -j                 -  (output Elastic bulk format)\n");
   fprintf(ERROUT,"\n");
   fprintf(ERROUT,"tcpdump output:\n");
   fprintf(ERROUT, "   -t                 -  (output in binary tcpdump(1) format)\n");
@@ -4854,6 +4924,7 @@ static void process_command_line(int argc, char *argv[])
     switch(in) {
     case 't':
     case 'l':
+    case 'j':
     case 'g':
     case 'H':
     case 'x':
