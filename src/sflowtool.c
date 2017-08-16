@@ -884,8 +884,8 @@ static void writeFlowElastic(SFSample *sample)
     printAddress(&sample->ipdst, dstIP)
   );
 
-  printf("\"src_asn:%d,", lookupASN(srcIP));
-  printf("\"dst_asn:%d,", lookupASN(dstIP));
+  printf("\"sample_srcasn:%d,", lookupASN(srcIP));
+  printf("\"sample_dstasn:%d,", lookupASN(dstIP));
 
   printf("\"sample_ipprotocol\":%d,\"sample_iptos\":%d,\"sample_ipttl\":%d,\"sample_ipsport\":%d,\"sample_ipdstport\":%d,\"sample_tcpflags\":%d,",
     sample->dcd_ipProtocol,
@@ -3331,6 +3331,9 @@ static void readFlowSample(SFSample *sample, int expanded)
       /* if we are writing tcpdump format, write the next packet record now */
       writePcapPacket(sample);
       break;
+    case SFLFMT_JSON:
+      writeFlowElastic(sample);
+      break;
     case SFLFMT_LINE:
       /* or line-by-line output... */
       writeFlowLine(sample);
@@ -5308,6 +5311,7 @@ static void process_command_line(int argc, char *argv[])
     case 't': sfConfig.outputFormat = SFLFMT_PCAP; break;
     case 'l': sfConfig.outputFormat = SFLFMT_LINE; break;
     case 'H': sfConfig.outputFormat = SFLFMT_CLF; break;
+    case 'j': sfConfig.outputFormat = SFLFMT_JSON; break;
     case 'g': sfConfig.outputFormat = SFLFMT_SCRIPT; break;
     case 'r':
         len_str = strlen(argv[arg]); /* argv[arg] already null-terminated */
