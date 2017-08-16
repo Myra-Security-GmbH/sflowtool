@@ -21,6 +21,7 @@ extern "C" {
 #include <time.h>
 #include <setjmp.h>
 #include <ctype.h>
+#include <maxminddb.h>
 
 #ifdef WIN32
 #else
@@ -54,6 +55,8 @@ extern "C" {
 #include <byteswap.h>
 #endif
 */
+
+static MMDB_s mmdb;
 
 /* just do it in a portable way... */
 static uint32_t MyByteSwap32(uint32_t n) {
@@ -618,6 +621,46 @@ static void readFlowSample(SFSample *sample, int expanded);
 static char *printTag(uint32_t tag, char *buf);
 static char *printAddress(SFLAddress *address, char *buf);
 
+
+/*_________________---------------------------__________________
+  _________________     ASN lookup       __________________
+  -----------------___________________________------------------
+*/
+uint32_t lookupASN(char *ip_address) {
+  int gai_error, mmdb_error;
+  MMDB_lookup_result_s result =
+    MMDB_lookup_string(&mmdb, ip_address, &gai_error, &mmdb_error);
+
+  if (0 != gai_error) {
+      fprintf(stderr,
+              "\n  Error from getaddrinfo for %s - %s\n\n",
+              ip_address, gai_strerror(gai_error));
+      return 0;
+  }
+
+  if (MMDB_SUCCESS != mmdb_error) {
+      fprintf(stderr,
+              "\n  Got an error from libmaxminddb: %s\n\n",
+              MMDB_strerror(mmdb_error));
+      return 0;
+  }
+
+  MMDB_entry_data_s entry_data;
+  int status =
+      MMDB_get_value(&result.entry, &entry_data, "autonomous_system_number", NULL);
+
+  if (MMDB_SUCCESS != status) {
+    fprintf(stderr, "Fail reading asn\n");
+    return 0;
+  }
+
+  if (entry_data.has_data) {
+    return entry_data.uint32;
+  }
+
+  return 0;
+}
+
 /*_________________---------------------------__________________
   _________________     heap allocation       __________________
   -----------------___________________________------------------
@@ -840,6 +883,9 @@ static void writeFlowElastic(SFSample *sample)
     printAddress(&sample->ipsrc, srcIP),
     printAddress(&sample->ipdst, dstIP)
   );
+
+  printf("\"src_asn:%d,", lookupASN(srcIP));
+  printf("\"dst_asn:%d,", lookupASN(dstIP));
 
   printf("\"sample_ipprotocol\":%d,\"sample_iptos\":%d,\"sample_ipttl\":%d,\"sample_ipsport\":%d,\"sample_ipdstport\":%d,\"sample_tcpflags\":%d,",
     sample->dcd_ipProtocol,
@@ -1688,7 +1734,7 @@ static void sendNetFlowDatagram_spoof(SFSample *sample, NFFlowPkt *pkt)
 static void openNetFlowSocket()
 {
   struct sockaddr_in addr;
-  
+
 #ifdef SPOOFSOURCE
   if(sfConfig.spoofSource) {
     openNetFlowSocket_spoof();
@@ -2251,7 +2297,7 @@ static void mplsLabelStack(SFSample *sample, char *fieldName)
   if(lstk.depth > 0) lstk.stack = (uint32_t *)sample->datap;
   /* and skip over it in the input */
   skipBytes(sample, lstk.depth * 4);
- 
+
   if(lstk.depth > 0) {
     uint32_t j = 0;
     for(; j < lstk.depth; j++) {
@@ -2282,7 +2328,7 @@ static void readExtendedMpls(SFSample *sample)
 
   mplsLabelStack(sample, "mpls_input_stack");
   mplsLabelStack(sample, "mpls_output_stack");
-  
+
   sample->extended_data_tag |= SASAMPLE_EXTENDED_DATA_MPLS;
 }
 
@@ -2325,7 +2371,7 @@ static void readExtendedMplsTunnel(SFSample *sample)
 #define SA_MAX_TUNNELNAME_LEN 100
   char tunnel_name[SA_MAX_TUNNELNAME_LEN+1];
   uint32_t tunnel_id, tunnel_cos;
-  
+
   if(getString(sample, tunnel_name, SA_MAX_TUNNELNAME_LEN) > 0)
     sf_log(sample,"mpls_tunnel_lsp_name %s\n", tunnel_name);
   tunnel_id = getData32(sample);
@@ -2397,7 +2443,7 @@ static void readExtendedVlanTunnel(SFSample *sample)
   if(lstk.depth > 0) lstk.stack = (uint32_t *)sample->datap;
   /* and skip over it in the input */
   skipBytes(sample, lstk.depth * 4);
- 
+
   if(lstk.depth > 0) {
     uint32_t j = 0;
     for(; j < lstk.depth; j++) {
@@ -2519,7 +2565,7 @@ static void readFlowSample_header(SFSample *sample)
   }
   sample->headerLen = getData32(sample);
   sf_log(sample,"headerLen %u\n", sample->headerLen);
-  
+
   sample->header = (uint8_t *)sample->datap; /* just point at the header */
   skipBytes(sample, sample->headerLen);
   {
@@ -2527,17 +2573,17 @@ static void readFlowSample_header(SFSample *sample)
     printHex(sample->header, sample->headerLen, scratch, 2000, 0, 2000);
     sf_log(sample,"headerBytes %s\n", scratch);
   }
-  
+
   switch(sample->headerProtocol) {
     /* the header protocol tells us where to jump into the decode */
   case SFLHEADER_ETHERNET_ISO8023:
     decodeLinkLayer(sample);
     break;
-  case SFLHEADER_IPv4: 
+  case SFLHEADER_IPv4:
     sample->gotIPV4 = YES;
     sample->offsetToIPV4 = 0;
     break;
-  case SFLHEADER_IPv6: 
+  case SFLHEADER_IPv6:
     sample->gotIPV6 = YES;
     sample->offsetToIPV6 = 0;
     break;
@@ -2563,7 +2609,7 @@ static void readFlowSample_header(SFSample *sample)
     fprintf(ERROUT, "undefined headerProtocol = %d\n", sample->headerProtocol);
     exit(-12);
   }
-  
+
   if(sample->gotIPV4) {
     /* report the size of the original IPPdu (including the IP header) */
     sf_log(sample,"IPSize %d\n",  sample->sampledPacketSize - sample->stripped - sample->offsetToIPV4);
@@ -2617,7 +2663,7 @@ static void readFlowSample_IPv4(SFSample *sample, char *prefix)
     SFLSampled_ipv4 nfKey;
     memcpy(&nfKey, sample->header, sizeof(nfKey));
     sample->sampledPacketSize = ntohl(nfKey.length);
-    sf_log(sample,"%ssampledPacketSize %u\n", prefix, sample->sampledPacketSize); 
+    sf_log(sample,"%ssampledPacketSize %u\n", prefix, sample->sampledPacketSize);
     sf_log(sample,"%sIPSize %u\n", prefix,  sample->sampledPacketSize);
     sample->ipsrc.type = SFLADDRESSTYPE_IP_V4;
     sample->ipsrc.address.ip_v4 = nfKey.src_ip;
@@ -2673,8 +2719,8 @@ static void readFlowSample_IPv6(SFSample *sample, char *prefix)
     SFLSampled_ipv6 nfKey6;
     memcpy(&nfKey6, sample->header, sizeof(nfKey6));
     sample->sampledPacketSize = ntohl(nfKey6.length);
-    sf_log(sample,"%ssampledPacketSize %u\n", prefix, sample->sampledPacketSize); 
-    sf_log(sample,"%sIPSize %u\n", prefix, sample->sampledPacketSize); 
+    sf_log(sample,"%ssampledPacketSize %u\n", prefix, sample->sampledPacketSize);
+    sf_log(sample,"%sIPSize %u\n", prefix, sample->sampledPacketSize);
     sample->ipsrc.type = SFLADDRESSTYPE_IP_V6;
     memcpy(&sample->ipsrc.address.ip_v6, &nfKey6.src_ip, 16);
     sample->ipdst.type = SFLADDRESSTYPE_IP_V6;
@@ -2916,7 +2962,7 @@ static void readExtendedSocket4(SFSample *sample)
   sf_log(sample,"socket4_remote_ip %s\n", printAddress(&sample->ipdst, buf));
   sf_log_next32(sample, "socket4_local_port");
   sf_log_next32(sample, "socket4_remote_port");
-  
+
   if(sfConfig.outputFormat == SFLFMT_CLF) {
     memcpy(sfCLF.client, buf, 50);
     sfCLF.client[50] = '\0';
@@ -3065,7 +3111,7 @@ static void readFlowSample_v2v4(SFSample *sample)
     sample->ds_index = samplerId & 0x00ffffff;
     sf_log(sample,"sourceId %u:%u\n", sample->ds_class, sample->ds_index);
   }
-  
+
   sample->meanSkipCount = getData32(sample);
   sample->samplePool = getData32(sample);
   sample->dropEvents = getData32(sample);
@@ -3081,11 +3127,11 @@ static void readFlowSample_v2v4(SFSample *sample)
     else sf_log(sample,"outputPort multiple >1\n");
   }
   else sf_log(sample,"outputPort %u\n", sample->outputPort);
-  
+
   sample->packet_data_tag = getData32(sample);
-  
+
   switch(sample->packet_data_tag) {
-    
+
   case INMPACKETTYPE_HEADER: readFlowSample_header(sample); break;
   case INMPACKETTYPE_IPV4:
     sample->gotIPV4Struct = YES;
@@ -3274,7 +3320,7 @@ static void readFlowSample(SFSample *sample, int expanded)
     }
   }
   lengthCheck(sample, "flow_sample", sampleStart, sampleLength);
-  
+
   if(sampleFilterOK(sample)) {
     switch(sfConfig.outputFormat) {
     case SFLFMT_NETFLOW:
@@ -3334,7 +3380,7 @@ static void readCounters_generic(SFSample *sample)
   sample->ifCounters.ifOutErrors = sf_log_next32(sample, "ifOutErrors");
   sample->ifCounters.ifPromiscuousMode = sf_log_next32(sample, "ifPromiscuousMode");
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_ethernet    __________________
   -----------------___________________________------------------
@@ -3355,9 +3401,9 @@ static  void readCounters_ethernet(SFSample *sample)
   sf_log_next32(sample, "dot3StatsFrameTooLongs");
   sf_log_next32(sample, "dot3StatsInternalMacReceiveErrors");
   sf_log_next32(sample, "dot3StatsSymbolErrors");
-}	  
+}
 
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_tokenring   __________________
   -----------------___________________________------------------
@@ -3385,7 +3431,7 @@ static void readCounters_tokenring(SFSample *sample)
   sf_log_next32(sample, "dot5StatsFreqErrors");
 }
 
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_vg          __________________
   -----------------___________________________------------------
@@ -3410,7 +3456,7 @@ static void readCounters_vg(SFSample *sample)
 }
 
 
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_vlan        __________________
   -----------------___________________________------------------
@@ -3426,7 +3472,7 @@ static void readCounters_vlan(SFSample *sample)
   sf_log_next32(sample, "broadcastPkts");
   sf_log_next32(sample, "discards");
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_80211       __________________
   -----------------___________________________------------------
@@ -3455,7 +3501,7 @@ static void readCounters_80211(SFSample *sample)
   sf_log_next32(sample, "dot11QoSCFPollsUnusableCount");
   sf_log_next32(sample, "dot11QoSCFPollsLostCount");
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_processor   __________________
   -----------------___________________________------------------
@@ -3469,7 +3515,7 @@ static void readCounters_processor(SFSample *sample)
   sf_log_next64(sample, "total_memory_bytes");
   sf_log_next64(sample, "free_memory_bytes");
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_radio       __________________
   -----------------___________________________------------------
@@ -3547,7 +3593,7 @@ static void readCounters_host_hid(SFSample *sample)
     sf_log(sample,"os_release %s\n", os_release);
   }
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_adaptors    __________________
   -----------------___________________________------------------
@@ -3571,8 +3617,8 @@ static void readCounters_adaptors(SFSample *sample)
     }
   }
 }
- 
- 
+
+
 /*_________________----------------------------__________________
   _________________  readCounters_host_parent  __________________
   -----------------____________________________------------------
@@ -3615,7 +3661,7 @@ static void readCounters_host_cpu(SFSample *sample, uint32_t length)
     sf_log_next32(sample, "cpu_guest_nice");
   }
 }
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_host_mem    __________________
   -----------------___________________________------------------
@@ -3636,7 +3682,7 @@ static void readCounters_host_mem(SFSample *sample)
   sf_log_next32(sample, "swap_out");
 }
 
- 
+
 /*_________________---------------------------__________________
   _________________  readCounters_host_dsk    __________________
   -----------------___________________________------------------
@@ -4232,7 +4278,7 @@ static void readCountersSample_v2v4(SFSample *sample)
   /* now find out what sort of counter blocks we have here... */
   sample->counterBlockVersion = getData32(sample);
   sf_log(sample,"counterBlockVersion %u\n", sample->counterBlockVersion);
-  
+
   /* first see if we should read the generic stats */
   switch(sample->counterBlockVersion) {
   case INMCOUNTERSVERSION_GENERIC:
@@ -4244,7 +4290,7 @@ static void readCountersSample_v2v4(SFSample *sample)
   case INMCOUNTERSVERSION_VLAN: break;
   default: receiveError(sample, "unknown stats version", YES); break;
   }
-  
+
   /* now see if there are any specific counter blocks to add */
   switch(sample->counterBlockVersion) {
   case INMCOUNTERSVERSION_GENERIC: /* nothing more */ break;
@@ -4274,7 +4320,7 @@ static void readCountersSample(SFSample *sample, int expanded)
   sampleLength = getData32(sample);
   sampleStart = (uint8_t *)sample->datap;
   sample->samplesGenerated = getData32(sample);
-  
+
   sf_log(sample,"sampleSequenceNo %u\n", sample->samplesGenerated);
   if(expanded) {
     sample->ds_class = getData32(sample);
@@ -4286,7 +4332,7 @@ static void readCountersSample(SFSample *sample, int expanded)
     sample->ds_index = samplerId & 0x00ffffff;
   }
   sf_log(sample,"sourceId %u:%u\n", sample->ds_class, sample->ds_index);
-  
+
   num_elements = getData32(sample);
   {
     uint32_t el;
@@ -4298,7 +4344,7 @@ static void readCountersSample(SFSample *sample, int expanded)
       sf_log(sample,"counterBlock_tag %s\n", printTag(tag, buf));
       length = getData32(sample);
       start = (uint8_t *)sample->datap;
-      
+
       switch(tag) {
       case SFLCOUNTERS_GENERIC: readCounters_generic(sample); break;
       case SFLCOUNTERS_ETHERNET: readCounters_ethernet(sample); break;
@@ -4518,7 +4564,7 @@ static void readSFlowDatagram(SFSample *sample)
 {
   uint32_t samplesInPacket;
   char buf[51];
-  
+
   /* log some datagram info */
   sf_log(sample,"datagramSourceIP %s\n", printAddress(&sample->sourceIP, buf));
   sf_log(sample,"datagramSize %u\n", sample->rawSampleLen);
@@ -4533,7 +4579,7 @@ static void readSFlowDatagram(SFSample *sample)
      sample->datagramVersion != 5) {
     receiveError(sample,  "unexpected datagram version number\n", YES);
   }
-  
+
   /* get the agent address */
   getAddress(sample, &sample->agent_addr);
 
@@ -4662,7 +4708,7 @@ static int openInputUDPSocket(uint16_t port)
   myaddr_in.sin_family = AF_INET;
   /* myaddr_in6.sin6_addr.s_addr = INADDR_ANY; */
   myaddr_in.sin_port = htons(port);
-  
+
   if ((soc = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
     fprintf(ERROUT, "v4 socket() creation failed, %s\n", strerror(errno));
     return -1;
@@ -4698,7 +4744,7 @@ static int openInputUDP6Socket(uint16_t port)
   myaddr_in6.sin6_family = AF_INET6;
   /* myaddr_in6.sin6_addr = INADDR_ANY; */
   myaddr_in6.sin6_port = htons(port);
-  
+
   if ((soc = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
     fprintf(ERROUT, "v6 socket() creation failed, %s\n", strerror(errno));
     exit(-6);
@@ -4807,7 +4853,7 @@ static int pcapOffsetToSFlow(uint8_t *start, int len)
       ptr += 2;
     }
     break;
-      
+
   case DLT_EN10MB:
   default:
     /* assume Ethernet header */
@@ -4834,7 +4880,7 @@ static int pcapOffsetToSFlow(uint8_t *start, int len)
 
   /* now we're just looking for IP */
   if(end - ptr < NFT_MIN_SIZ) return -1; /* not enough for an IPv4 header */
-  
+
   /* peek for IPX */
   if(type_len == 0x0200 || type_len == 0x0201 || type_len == 0x0600) {
 #define IPX_HDR_LEN 30
@@ -4846,8 +4892,8 @@ static int pcapOffsetToSFlow(uint8_t *start, int len)
        ipxLen <= (IPX_HDR_LEN + IPX_MAX_DATA))
       /* we don't do anything with IPX here */
       return -1;
-  } 
-  
+  }
+
   if(type_len <= NFT_MAX_8023_LEN) {
     /* assume 802.3+802.2 header */
     /* check for SNAP */
@@ -4878,7 +4924,7 @@ static int pcapOffsetToSFlow(uint8_t *start, int len)
     }
   }
   if(ptr >= end) return -1;
-  
+
   /* assume type_len is an ethernet-type now */
 
   if(type_len == 0x0800) {
@@ -4929,7 +4975,7 @@ static int readPcapPacket(FILE *file)
     hdr.caplen = MyByteSwap32(hdr.caplen);
     hdr.len = MyByteSwap32(hdr.len);
   }
-  
+
   if(fread(buf, hdr.caplen, 1, file) != 1) {
     fprintf(ERROUT, "unable to read pcap packet from %s : %s\n", sfConfig.readPcapFileName, strerror(errno));
     exit(-34);
@@ -5020,9 +5066,9 @@ static int parseOrResolveAddress(char *name, struct sockaddr *sa, SFLAddress *ad
     /* try again if err == EAI_AGAIN? */
     return NO;
   }
-  
+
   if(info == NULL) return NO;
-  
+
   if(info->ai_addr) {
     // answer is now in info - a linked list of answers with sockaddr values.
     // extract the address we want from the first one. $$$ should perhaps
@@ -5137,7 +5183,7 @@ static int addForwardingTarget(char *hostandport)
   }
 
   return YES;
-}  
+}
 
 /*_________________---------------------------__________________
   _________________      instructions         __________________
@@ -5286,7 +5332,7 @@ static void process_command_line(int argc, char *argv[])
       break;
     case 'e': sfConfig.netFlowPeerAS = YES; break;
     case 's': sfConfig.disableNetFlowScale = YES; break;
-#ifdef SPOOFSOURCE      
+#ifdef SPOOFSOURCE
     case 'S': sfConfig.spoofSource = YES; break;
 #endif
     case 'N':
@@ -5390,7 +5436,7 @@ int main(int argc, char *argv[])
       exit(-7);
     }
   }
-    
+
   /* possible open an output socket for netflow */
   if(sfConfig.netFlowOutputPort != 0 && sfConfig.netFlowOutputIP.s_addr != 0) openNetFlowSocket();
   /* if tcpdump format, write the header */
@@ -5400,6 +5446,13 @@ int main(int argc, char *argv[])
     while(readPcapPacket(sfConfig.readPcapFile));
   }
   else {
+    int status = MMDB_open("/usr/share/GeoIP/GeoLite2-ASN.mmdb", MMDB_MODE_MMAP, &mmdb);
+
+    if (MMDB_SUCCESS != status) {
+      fprintf(ERROUT, "unable to open database /usr/share/GeoIP/GeoLite2-ASN.mmdb");
+      exit(-1);
+    }
+
     fd_set readfds;
     /* set the select mask */
     FD_ZERO(&readfds);
@@ -5409,10 +5462,10 @@ int main(int argc, char *argv[])
       struct timeval timeout;
       timeout.tv_sec = 0;
       timeout.tv_usec = 100000;
-      
+
       if(soc4 != -1) FD_SET(soc4, &readfds);
       if(soc6 != -1) FD_SET(soc6, &readfds);
-      
+
       nfds = select((soc4 > soc6 ? soc4 : soc6) + 1,
 		    &readfds,
 		    (fd_set *)NULL,
@@ -5443,6 +5496,9 @@ int main(int argc, char *argv[])
       }
     }
   }
+
+  MMDB_close(&mmdb);
+
   return 0;
 }
 
