@@ -884,8 +884,8 @@ static void writeFlowElastic(SFSample *sample)
     printAddress(&sample->ipdst, dstIP)
   );
 
-  printf("\"sample_srcasn:%d,", lookupASN(srcIP));
-  printf("\"sample_dstasn:%d,", lookupASN(dstIP));
+  printf("\"sample_srcasn\":%d,", lookupASN(srcIP));
+  printf("\"sample_dstasn\":%d,", lookupASN(dstIP));
 
   printf("\"sample_ipprotocol\":%d,\"sample_iptos\":%d,\"sample_ipttl\":%d,\"sample_ipsport\":%d,\"sample_ipdstport\":%d,\"sample_tcpflags\":%d,",
     sample->dcd_ipProtocol,
